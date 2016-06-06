@@ -242,6 +242,7 @@ struct Message {
     reply = natsMsg_GetReply(nats_msg);
     data = natsMsg_GetData(nats_msg);
     data_length = natsMsg_GetDataLength(nats_msg);
+    nats_msg_ = nats_msg;
   }
 
   ~Message() {
