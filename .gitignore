@@ -6,3 +6,6 @@ docs/
 
 # Autocomplete files
 .ycm_extra_conf.py*
+
+# Build directory
+build/

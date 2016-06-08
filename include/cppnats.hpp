@@ -11,10 +11,9 @@
 #include <string>
 #include <vector>
 
-namespace cppnats {
-
-// Don't want to pollute the global namespace.
 #include <nats.h>
+
+namespace cppnats {
 
 /** \brief Status represents the result of a NATS operation.
  *
@@ -170,6 +169,9 @@ static Status convert_natsStatus(natsStatus status) {
 
     case NATS_SSL_ERROR:
       return Status::SSLError;
+
+    default:
+      return Status::Err;
   }
 }
 
@@ -212,6 +214,9 @@ static ConnectionStatus convert_natsConnStatus(natsConnStatus status) {
 
     case RECONNECTING:
       return ConnectionStatus::Reconnecting;
+
+    default:  // unknown state
+      return ConnectionStatus::Closed;
   }
 }
 
@@ -227,6 +232,26 @@ struct Message {
   const char* data;
   size_t data_length;
 
+  Message(const std::string& subject, const char* data, size_t data_length)
+      : subject(subject), data(data), data_length(data_length) {}
+
+  Message(const std::string& subject, const std::string& data)
+      : subject(subject),
+        reply(""),
+        data(data.data()),
+        data_length(data.length()) {}
+
+  Message(const std::string& subject, const std::string& reply,
+          const char* data, size_t data_length)
+      : subject(subject), reply(reply), data(data), data_length(data_length) {}
+
+  Message(const std::string& subject, const std::string& reply,
+          const std::string& data)
+      : subject(subject),
+        reply(reply),
+        data(data.data()),
+        data_length(data.length()) {}
+
   /** \brief Construct a Message by taking ownership of a natsMsg*.
    *
    * This is an ugly workaround but it works.
@@ -234,19 +259,17 @@ struct Message {
    * \warning Take care that this constructor isn't called twice for the same
    * message.
    */
-  Message(natsMsg* nats_msg) {
-    if (nats_msg == nullptr)
-      throw std::invalid_argument("nats_msg cannot be nullptr");
+  Message(natsMsg* nats_msg) : nats_msg_(nats_msg) {
+    if (!nats_msg) throw std::invalid_argument("nats_msg cannot be nullptr");
 
     subject = natsMsg_GetSubject(nats_msg);
     reply = natsMsg_GetReply(nats_msg);
     data = natsMsg_GetData(nats_msg);
     data_length = natsMsg_GetDataLength(nats_msg);
-    nats_msg_ = nats_msg;
   }
 
   ~Message() {
-    if (nats_msg_ != nullptr) natsMsg_Destroy(nats_msg_);
+    if (nats_msg_) natsMsg_Destroy(nats_msg_);
   }
 
   // Cannot be copied.
@@ -264,7 +287,7 @@ struct Message {
   }
 
  private:
-  natsMsg* nats_msg_;
+  natsMsg* nats_msg_ = nullptr;  // Default value should be nullptr
 };
 
 /** \brief Options passed to Connection to open up a new connection.
@@ -278,15 +301,39 @@ class Options {
   /// or close.
   typedef std::function<void(Connection&)> connection_handler;
 
-  Options();
+  /** \brief Construct a Options and specify a URL to connect to.
+   *
+   * Constructs Options and sets the URL of the `NATS Server` the client should
+   * try to connect to.
+   *
+   * @see url
+   *
+   * @param connect_url url the string representing the URL the connection
+   *                    should use to connect to the server.
+   */
+  Options(const std::string& connect_url) {
+    natsOptions_Create(&opts_);
+    HANDLE_STATUS(natsOptions_SetURL(opts_, connect_url.c_str()));
+  }
 
-  ~Options() { natsOptions_Destroy(opts_); };
+  ~Options() {
+    if (opts_) natsOptions_Destroy(opts_);
+  }
 
   // Class cannot be copied. NATS does have a natsOptions_clone but it isn't
   // exposed so we can do nothing about it. It could theoretically still be
   // copied but we aren't going to bother with it.
   void operator=(const Options&) = delete;
   Options(const Options&) = delete;
+
+  /// Move constructor.
+  Options(Options&& other)
+      : opts_(other.opts_),
+        closed_cb_(other.closed_cb_),
+        disconnected_cb_(other.disconnected_cb_),
+        reconnected_cb_(other.reconnected_cb_) {
+    other.opts_ = nullptr;
+  }
 
   /// Return the underlying natsOptions pointer.
   natsOptions* _get_ptr() const { return opts_; }
@@ -314,9 +361,9 @@ class Options {
    * nats://user@localhost:4222
    * nats://user:password@localhost:4222
    */
-  Options& url(const std::string& url) {
+  Options url(const std::string& url) {
     HANDLE_STATUS(natsOptions_SetURL(opts_, url.c_str()));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Set the list of servers to try to (re)connect to.
@@ -331,8 +378,8 @@ class Options {
    *                  provided by #url() + #servers(). Otherwise, the list is
    *                  formed in a random order.
    */
-  Options& servers(const std::vector<std::string>& servers,
-                   bool randomize = false) {
+  Options servers(const std::vector<std::string>& servers,
+                  bool randomize = false) {
     // Convert vector<string> to vector<const char*>
     std::vector<const char*> temp(servers.size());
     std::transform(servers.begin(), servers.end(), temp.begin(),
@@ -340,7 +387,7 @@ class Options {
 
     HANDLE_STATUS(natsOptions_SetServers(opts_, &temp[0], temp.size()));
     HANDLE_STATUS(natsOptions_SetNoRandomize(opts_, !randomize));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the (re)connect process timeout.
@@ -354,9 +401,9 @@ class Options {
    *                to complete.
    *
    */
-  Options& timeout(std::chrono::milliseconds timeout) {
+  Options timeout(std::chrono::milliseconds timeout) {
     HANDLE_STATUS(natsOptions_SetTimeout(opts_, timeout.count()));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the name.
@@ -366,9 +413,9 @@ class Options {
    *
    * @param name the name to set.
    */
-  Options& name(const std::string& name) {
+  Options name(const std::string& name) {
     HANDLE_STATUS(natsOptions_SetName(opts_, name.c_str()));
-    return *this;
+    return std::move(*this);
   }
 
   //
@@ -382,9 +429,9 @@ class Options {
    *
    * @param secure `true` for a secure connection, `false` otherwise.
    */
-  Options& secure(bool secure) {
+  Options secure(bool secure) {
     HANDLE_STATUS(natsOptions_SetSecure(opts_, secure));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Loads the trusted CA certificates from a file.
@@ -398,10 +445,10 @@ class Options {
    * @param filename the file containing the CA certificates.
    *
    */
-  Options& load_ca_trusted_certificates(const std::string& filename) {
+  Options load_ca_trusted_certificates(const std::string& filename) {
     HANDLE_STATUS(
         natsOptions_LoadCATrustedCertificates(opts_, filename.c_str()));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Loads the certificate chain from a file, using the given key.
@@ -417,11 +464,11 @@ class Options {
    * @param certs_filename the file containing the client certificates.
    * @param key_filename the file containing the client private key.
    */
-  Options& load_certificates_chain(const std::string& certs_filename,
-                                   const std::string& key_filename) {
+  Options load_certificates_chain(const std::string& certs_filename,
+                                  const std::string& key_filename) {
     HANDLE_STATUS(natsOptions_LoadCertificatesChain(
         opts_, certs_filename.c_str(), key_filename.c_str()));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the list of available ciphers.
@@ -436,9 +483,9 @@ class Options {
    *
    * @param ciphers the ciphers suite.
    */
-  Options& ciphers(const std::string& ciphers) {
+  Options ciphers(const std::string& ciphers) {
     HANDLE_STATUS(natsOptions_SetCiphers(opts_, ciphers.c_str()));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the server certificate's expected hostname.
@@ -449,9 +496,9 @@ class Options {
    *
    * @param hostname the expected server certificate hostname.
    */
-  Options& expected_hostname(const std::string& hostname) {
+  Options expected_hostname(const std::string& hostname) {
     HANDLE_STATUS(natsOptions_SetExpectedHostname(opts_, hostname.c_str()));
-    return *this;
+    return std::move(*this);
   }
 
   //
@@ -467,9 +514,9 @@ class Options {
    *
    * @param verbose `true` for a verbose protocol, `false` otherwise.
    */
-  Options& verbose(bool verbose) {
+  Options verbose(bool verbose) {
     HANDLE_STATUS(natsOptions_SetVerbose(opts_, verbose));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the pedantic mode.
@@ -481,9 +528,9 @@ class Options {
    *
    * @param pedantic `true` for a pedantic protocol, `false` otherwise.
    */
-  Options& pedantic(bool pedantic) {
+  Options pedantic(bool pedantic) {
     HANDLE_STATUS(natsOptions_SetPedantic(opts_, pedantic));
-    return *this;
+    return std::move(*this);
   }
 
   //
@@ -498,9 +545,9 @@ class Options {
    * @param interval the interval, in milliseconds, at which the connection
    *                 will send `PING` protocols to the server.
    */
-  Options& ping_interval(std::chrono::milliseconds interval) {
+  Options ping_interval(std::chrono::milliseconds interval) {
     HANDLE_STATUS(natsOptions_SetPingInterval(opts_, interval.count()));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the limit of outstanding `PING`s without corresponding
@@ -514,9 +561,9 @@ class Options {
    * @param num_pings_out the maximum number of `PING`s without `PONG`s
    *                      (positive number).
    */
-  Options& max_pings_out(int num_pings_out) {
+  Options max_pings_out(int num_pings_out) {
     HANDLE_STATUS(natsOptions_SetMaxPingsOut(opts_, num_pings_out));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Indicates if the connection will be allowed to reconnect.
@@ -529,9 +576,9 @@ class Options {
    * @param allow `true` if the connection is allowed to reconnect, `false`
    *              otherwise.
    */
-  Options& allow_reconnect(bool allow) {
+  Options allow_reconnect(bool allow) {
     HANDLE_STATUS(natsOptions_SetAllowReconnect(opts_, allow));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the maximum number of reconnect attempts.
@@ -540,9 +587,9 @@ class Options {
    *
    * @param num_reconnect the maximum number of reconnects (positive number).
    */
-  Options& max_reconnect(int num_reconnect) {
+  Options max_reconnect(int num_reconnect) {
     HANDLE_STATUS(natsOptions_SetMaxReconnect(opts_, num_reconnect));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the time between reconnect attempts.
@@ -557,9 +604,9 @@ class Options {
    * @param wait the time, in milliseconds, to wait between attempts to
    *             reconnect to the same server.
    */
-  Options& reconnect_wait(std::chrono::milliseconds wait) {
+  Options reconnect_wait(std::chrono::milliseconds wait) {
     HANDLE_STATUS(natsOptions_SetReconnectWait(opts_, wait.count()));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the size of the backing buffer used during reconnect.
@@ -573,9 +620,9 @@ class Options {
    * @param buf_size the size, in bytes, of the backing buffer for
    *                 write operations during a reconnect.
    */
-  Options& reconnect_buf_size(int buf_size) {
+  Options reconnect_buf_size(int buf_size) {
     HANDLE_STATUS(natsOptions_SetReconnectBufSize(opts_, buf_size));
-    return *this;
+    return std::move(*this);
   }
 
   /** \brief Sets the maximum number of pending messages per subscription.
@@ -590,9 +637,9 @@ class Options {
    * @param max_pending the number of messages allowed to be buffered by the
    *                    library before triggering a slow consumer scenario.
    */
-  Options& max_pending_messages(int max_pending) {
+  Options max_pending_messages(int max_pending) {
     HANDLE_STATUS(natsOptions_SetMaxPendingMsgs(opts_, max_pending));
-    return *this;
+    return std::move(*this);
   }
 
   /**
@@ -611,9 +658,9 @@ class Options {
    *
    * @param f the callback to be invoked when the connection is closed.
    */
-  Options& closed_callback(connection_handler f) {
+  Options closed_callback(connection_handler f) {
     closed_cb_ = f;
-    return *this;
+    return std::move(*this);
   }
 
   /// Return the close connection callback set using #closed_callback.
@@ -634,9 +681,9 @@ class Options {
    *
    * @param f the callback to be invoked when a connection to a server is lost.
    */
-  Options& disconnected_callback(connection_handler f) {
+  Options disconnected_callback(connection_handler f) {
     disconnected_cb_ = f;
-    return *this;
+    return std::move(*this);
   }
 
   /// Return the disconnected connection callback set using
@@ -658,9 +705,9 @@ class Options {
    * @param f the callback to be invoked when the connection to a server has
    *          been re-established.
    */
-  Options& reconnected_callback(connection_handler f) {
+  Options reconnected_callback(connection_handler f) {
     reconnected_cb_ = f;
-    return *this;
+    return std::move(*this);
   }
 
   /// Return the reconnected connection callback set using
@@ -704,7 +751,9 @@ class Connection {
     HANDLE_STATUS(natsConnection_Connect(&conn_, opts._get_ptr()));
   }
 
-  ~Connection() { natsConnection_Destroy(conn_); }
+  ~Connection() {
+    if (conn_) natsConnection_Destroy(conn_);
+  }
 
   // Class cannot be copied.
   void operator=(const Connection&) = delete;
@@ -858,9 +907,16 @@ class Connection {
    * @param msg the message to be published.
    */
   Status publish_message(const Message& msg) {
-    return convert_natsStatus(natsConnection_PublishRequest(
-        conn_, msg.subject.c_str(), msg.reply.c_str(), msg.data,
-        msg.data_length));
+    if (msg.subject.length() == 0) return Status::InvalidSubject;
+
+    if (msg.reply.length() == 0) {
+      return convert_natsStatus(natsConnection_Publish(
+          conn_, msg.subject.c_str(), msg.data, msg.data_length));
+    } else {
+      return convert_natsStatus(natsConnection_PublishRequest(
+          conn_, msg.subject.c_str(), msg.reply.c_str(), msg.data,
+          msg.data_length));
+    }
   }
 
   /** \brief Sends a request and waits for a reply.
@@ -895,6 +951,8 @@ class Connection {
 
   /// Set the closed callback handler in options.
   void set_closed_cb(const Options& opts) {
+    if (!opts.get_closed_callback()) return;
+
     closed_handler_ = [&opts, this](natsConnection*, void*) {
       opts.get_closed_callback()(*this);
     };
@@ -906,6 +964,8 @@ class Connection {
 
   /// Set the disconnected callback handler in options.
   void set_disconnected_cb(const Options& opts) {
+    if (!opts.get_disconnected_callback()) return;
+
     disconnected_handler_ = [&opts, this](natsConnection*, void*) {
       opts.get_disconnected_callback()(*this);
     };
@@ -917,6 +977,8 @@ class Connection {
 
   /// Set the reconnected callback handler in options.
   void set_reconnected_cb(const Options& opts) {
+    if (!opts.get_reconnected_callback()) return;
+
     reconnected_handler_ = [&opts, this](natsConnection*, void*) {
       opts.get_disconnected_callback()(*this);
     };
@@ -1035,7 +1097,9 @@ class Subscription {
    * Destroys the subscription object, freeing up memory.
    * If not already done, this call will removes interest on the subject.
    */
-  ~Subscription() { natsSubscription_Destroy(sub_); }
+  ~Subscription() {
+    if (sub_) natsSubscription_Destroy(sub_);
+  }
 
   // Class cannot be copied.
   void operator=(const Subscription&) = delete;
@@ -1154,7 +1218,7 @@ class Subscription {
   bool is_valid() const { return natsSubscription_IsValid(sub_); }
 
  private:
-  Subscription(Connection& conn) : conn_(conn){};  // private constructor
+  Subscription(Connection& conn) : conn_(conn) {}  // private constructor
 
   natsSubscription* sub_;
   Connection& conn_;
@@ -1174,6 +1238,9 @@ class Subscription {
     };
   }
 };
+
+/// Clean up any global data allocated by cnats (for a clean Valgrind report).
+void ShutdownLibrary() { nats_Close(); }
 
 }  // namespace cppnats
 
