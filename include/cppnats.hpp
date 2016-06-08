@@ -277,12 +277,11 @@ struct Message {
   Message(const Message&) = delete;
 
   // Move constructor.
-  Message(Message&& other)
-      : subject(other.subject),
-        reply(other.reply),
-        data(other.data),
-        data_length(other.data_length),
-        nats_msg_(other.nats_msg_) {
+  Message(Message&& other) noexcept : subject(other.subject),
+                                      reply(other.reply),
+                                      data(other.data),
+                                      data_length(other.data_length),
+                                      nats_msg_(other.nats_msg_) {
     other.nats_msg_ = nullptr;  // Don't want destructor to destroy this.
   }
 
@@ -327,11 +326,10 @@ class Options {
   Options(const Options&) = delete;
 
   /// Move constructor.
-  Options(Options&& other)
-      : opts_(other.opts_),
-        closed_cb_(other.closed_cb_),
-        disconnected_cb_(other.disconnected_cb_),
-        reconnected_cb_(other.reconnected_cb_) {
+  Options(Options&& other) noexcept : opts_(other.opts_),
+                                      closed_cb_(other.closed_cb_),
+                                      disconnected_cb_(other.disconnected_cb_),
+                                      reconnected_cb_(other.reconnected_cb_) {
     other.opts_ = nullptr;
   }
 
@@ -760,16 +758,12 @@ class Connection {
   Connection(const Connection&) = delete;
 
   /// Define a move constructor.
-  Connection(Connection&& other) noexcept {
-    conn_ = other.conn_;
-    closed_handler_ = other.closed_handler_;
-    disconnected_handler_ = other.disconnected_handler_;
-    reconnected_handler_ = other.reconnected_handler_;
-
+  Connection(Connection&& other) noexcept
+      : conn_(other.conn_),
+        closed_handler_(other.closed_handler_),
+        disconnected_handler_(other.disconnected_handler_),
+        reconnected_handler_(other.reconnected_handler_) {
     other.conn_ = nullptr;
-    other.closed_handler_ = nullptr;
-    other.disconnected_handler_ = nullptr;
-    other.reconnected_handler_ = nullptr;
   }
 
   /// Return the underlying natsConnection pointer.
@@ -1106,12 +1100,12 @@ class Subscription {
   Subscription(const Subscription&) = delete;
 
   /// Define a move constructor so that the factory methods work.
-  Subscription(Subscription&& other) : conn_(other.conn_), sync_(other.sync_) {
-    sub_ = other.sub_;
-    message_func_ = other.message_func_;
-
+  Subscription(Subscription&& other) noexcept
+      : sub_(other.sub_),
+        conn_(other.conn_),
+        sync_(other.sync_),
+        message_func_(other.message_func_) {
     other.sub_ = nullptr;
-    other.message_func_ = nullptr;
   }
 
   /** \brief Enables the No Delivery Delay mode.
