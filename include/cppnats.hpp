@@ -54,7 +54,6 @@ enum class Status {
 };
 
 // Forward declarations.
-class Options;
 class Connection;
 class Subscription;
 
@@ -956,51 +955,55 @@ class Connection {
 
   /// Set the closed callback handler in options.
   void set_closed_cb(const Options& opts) {
-    if (!opts.get_closed_callback()) return;
+    closed_handler_ = opts.get_closed_callback();
+    if (!closed_handler_) return;
 
-    closed_handler_ = [&opts, this](natsConnection*, void*) {
-      opts.get_closed_callback()(*this);
-    };
-
-    natsOptions_SetClosedCB(
-        opts._get_ptr(), closed_handler_.target<void(natsConnection*, void*)>(),
-        nullptr);
+    natsOptions_SetClosedCB(opts._get_ptr(), closed_handler_nats,
+                            reinterpret_cast<void*>(this));
   }
 
   /// Set the disconnected callback handler in options.
   void set_disconnected_cb(const Options& opts) {
-    if (!opts.get_disconnected_callback()) return;
+    disconnected_handler_ = opts.get_disconnected_callback();
+    if (!disconnected_handler_) return;
 
-    disconnected_handler_ = [&opts, this](natsConnection*, void*) {
-      opts.get_disconnected_callback()(*this);
-    };
-
-    natsOptions_SetDisconnectedCB(
-        opts._get_ptr(),
-        disconnected_handler_.target<void(natsConnection*, void*)>(), nullptr);
+    natsOptions_SetDisconnectedCB(opts._get_ptr(), disconnected_handler_nats,
+                                  reinterpret_cast<void*>(this));
   }
 
   /// Set the reconnected callback handler in options.
   void set_reconnected_cb(const Options& opts) {
-    if (!opts.get_reconnected_callback()) return;
+    reconnected_handler_ = opts.get_reconnected_callback();
+    if (!reconnected_handler_) return;
 
-    reconnected_handler_ = [&opts, this](natsConnection*, void*) {
-      opts.get_disconnected_callback()(*this);
-    };
-
-    natsOptions_SetReconnectedCB(
-        opts._get_ptr(),
-        reconnected_handler_.target<void(natsConnection*, void*)>(), nullptr);
+    natsOptions_SetReconnectedCB(opts._get_ptr(), reconnected_handler_nats,
+                                 reinterpret_cast<void*>(this));
   }
 
  private:
   natsConnection* conn_;
 
-  typedef std::function<void(natsConnection*, void*)> conn_handler_nats;
+  // The following variables and functions are useful for connection callbacks.
+  // This is because we cannot take function pointer to a lambda and thus must
+  // rely on passing around the Connection instance.
+  Options::connection_handler closed_handler_;
+  Options::connection_handler disconnected_handler_;
+  Options::connection_handler reconnected_handler_;
 
-  conn_handler_nats closed_handler_;
-  conn_handler_nats disconnected_handler_;
-  conn_handler_nats reconnected_handler_;
+  static void closed_handler_nats(natsConnection*, void* data) {
+    auto f = reinterpret_cast<Connection*>(data);
+    f->closed_handler_(*f);
+  }
+
+  static void disconnected_handler_nats(natsConnection*, void* data) {
+    auto f = reinterpret_cast<Connection*>(data);
+    f->disconnected_handler_(*f);
+  }
+
+  static void reconnected_handler_nats(natsConnection*, void* data) {
+    auto f = reinterpret_cast<Connection*>(data);
+    f->reconnected_handler_(*f);
+  }
 };
 
 /** \brief Wraps a natsSubscription and provides a high-level API.
