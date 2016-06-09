@@ -390,17 +390,20 @@ class Options {
 
   /** \brief Sets the (re)connect process timeout.
    *
-   * This timeout, expressed in milliseconds, is used to interrupt a
-   * (re)connect attempt to a `NATS Server`. This timeout is used both for the
-   * low level TCP connect call, and for timing out the response from the
-   * server to the client's initial `PING` protocol.
+   * This timeout is used to interrupt a (re)connect attempt to a `NATS Server`.
+   * This timeout is used both for the low level TCP connect call, and for
+   * timing out the response from the server to the client's initial `PING`
+   * protocol.
    *
    * @param timeout the time allowed for an individual connect (or reconnect)
    *                to complete.
    *
    */
-  Options timeout(std::chrono::milliseconds timeout) {
-    HANDLE_STATUS(natsOptions_SetTimeout(opts_, timeout.count()));
+  template <class Rep, class Period>
+  Options timeout(const std::chrono::duration<Rep, Period>& timeout) {
+    HANDLE_STATUS(natsOptions_SetTimeout(
+        opts_, std::chrono::duration_cast<std::chrono::milliseconds>(timeout)
+                   .count()));
     return std::move(*this);
   }
 
@@ -537,14 +540,17 @@ class Options {
 
   /** \brief Sets the ping interval.
    *
-   * Interval, expressed in milliseconds, in which the client sends `PING`
-   * protocols to the `NATS Server`.
+   * Interval, in which the client sends `PING` protocols to the `NATS Server`.
    *
-   * @param interval the interval, in milliseconds, at which the connection
-   *                 will send `PING` protocols to the server.
+   * @param interval the interval at which the connection will send `PING`
+   *                 protocols to the server.
    */
-  Options ping_interval(std::chrono::milliseconds interval) {
-    HANDLE_STATUS(natsOptions_SetPingInterval(opts_, interval.count()));
+
+  template <class Rep, class Period>
+  Options ping_interval(const std::chrono::duration<Rep, Period>& interval) {
+    HANDLE_STATUS(natsOptions_SetPingInterval(
+        opts_, std::chrono::duration_cast<std::chrono::milliseconds>(interval)
+                   .count()));
     return std::move(*this);
   }
 
@@ -596,14 +602,17 @@ class Options {
    * server. This means that if you have a list with S1,S2 and are currently
    * connected to S1, and get disconnected, the library will immediately
    * attempt to connect to S2. If this fails, it will go back to S1, and this
-   * time will wait for `wait` milliseconds since the last attempt to connect
-   * to S1.
+   * time will wait for specified time interval since the last attempt to
+   * connect to S1.
    *
-   * @param wait the time, in milliseconds, to wait between attempts to
-   *             reconnect to the same server.
+   * @param wait the time to wait between attempts to reconnect to the same
+   *             server.
    */
-  Options reconnect_wait(std::chrono::milliseconds wait) {
-    HANDLE_STATUS(natsOptions_SetReconnectWait(opts_, wait.count()));
+  template <class Rep, class Period>
+  Options reconnect_wait(const std::chrono::duration<Rep, Period>& wait) {
+    HANDLE_STATUS(natsOptions_SetReconnectWait(
+        opts_,
+        std::chrono::duration_cast<std::chrono::milliseconds>(wait).count()));
     return std::move(*this);
   }
 
@@ -815,17 +824,18 @@ class Connection {
   /** \brief Flushes the connection with a given timeout.
    *
    * Performs a round trip to the server and return when it receives the
-   * internal reply, or if the call times-out (timeout is expressed in
-   * milliseconds).
+   * internal reply, or if the call times-out.
    *
    * See possible failure case described in #flush().
    *
    * @param timeout is the time allowed for the flush to complete before
    *                #Status::Timeout error is returned.
    */
-  Status flush_timeout(std::chrono::milliseconds timeout) {
-    return convert_natsStatus(
-        natsConnection_FlushTimeout(conn_, timeout.count()));
+  template <class Rep, class Period>
+  Status flush_timeout(const std::chrono::duration<Rep, Period>& timeout) {
+    return convert_natsStatus(natsConnection_FlushTimeout(
+        conn_, std::chrono::duration_cast<std::chrono::milliseconds>(timeout)
+                   .count()));
   }
 
   /** \brief Returns the maximum message payload.
@@ -921,15 +931,16 @@ class Connection {
    * This is optimized for the case of multiple responses.
    *
    * @param req the request message.
-   * @param timeout in milliseconds, before this call returns nullptr
-   *        if no response is received in this alloted time.
+   * @param timeout before this call returns nullptr if no response is received
+   *                in this alloted time.
    */
+  template <class Rep, class Period>
   std::unique_ptr<Message> request_and_get_reply(
-      const Message& req, std::chrono::milliseconds timeout) {
+      const Message& req, const std::chrono::duration<Rep, Period>& timeout) {
     natsMsg* nats_msg;
-    natsStatus status =
-        natsConnection_Request(&nats_msg, conn_, req.subject.c_str(), req.data,
-                               req.data_length, timeout.count());
+    natsStatus status = natsConnection_Request(
+        &nats_msg, conn_, req.subject.c_str(), req.data, req.data_length,
+        std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
     if (status == NATS_TIMEOUT)
       return nullptr;
     else
@@ -1120,21 +1131,23 @@ class Subscription {
    *
    * Return the next message available to a synchronous subscriber or block
    * until one is available.
-   * A timeout (expressed in milliseconds) can be used to return when no message
-   * has been delivered. If the value is zero, then this call will not wait and
-   * return the next message that was pending in the client, and nullptr
-   * otherwise.
+   * A timeout can be used to return when no message has been delivered. If the
+   * value is zero or less than 1 ms, then this call will not wait and return
+   * the next message that was pending in the client, and nullptr otherwise.
    *
-   * @param timeout time, in milliseconds, after which this call will return
-   *                nullptr if no message is available.
+   * @param timeout time after which this call will return nullptr if no message
+   *                is available.
    */
-  std::unique_ptr<Message> next_msg(std::chrono::milliseconds timeout) {
+  template <class Rep, class Period>
+  std::unique_ptr<Message> next_msg(
+      const std::chrono::duration<Rep, Period>& timeout) {
     if (!sync_)
       throw std::logic_error("sychronous method called on async subscription");
 
     natsMsg* nats_msg;
-    natsStatus status =
-        natsSubscription_NextMsg(&nats_msg, sub_, timeout.count());
+    natsStatus status = natsSubscription_NextMsg(
+        &nats_msg, sub_,
+        std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
     if (status == NATS_TIMEOUT)
       return nullptr;
     else
