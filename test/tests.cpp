@@ -3,7 +3,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <chrono>
 #include <condition_variable>
-#include <iostream>
 #include <mutex>
 #include <thread>
 
@@ -58,7 +57,6 @@ TEST_CASE("Test if connection succeeds") {
     auto sub = cppnats::Subscription::Async(
         conn, subject,
         [&m, &cv, &msg, &data](const cppnats::Message& msg_recvd) {
-          std::cout << "Why are we never here?" << std::endl;
           std::lock_guard<std::mutex> lk(m);
 
           CHECK(msg_recvd.subject == msg.subject);

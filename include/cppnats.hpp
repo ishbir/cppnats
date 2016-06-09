@@ -1014,13 +1014,12 @@ class Subscription {
   static Subscription Async(Connection& conn, const std::string& subject,
                             message_handler f) {
     Subscription sub(conn);
-    sub.set_message_func(f);
+    // Dynamic allocation so that it outlasts the function.
+    message_handler* handler = new message_handler(f);
 
     HANDLE_STATUS(natsConnection_Subscribe(
-        &sub.sub_, conn._get_ptr(), subject.c_str(),
-        sub.message_func_.target<void(natsConnection*, natsSubscription*,
-                                      natsMsg*, void*)>(),
-        nullptr));
+        &sub.sub_, conn._get_ptr(), subject.c_str(),  // test_handler,
+        message_handler_func, reinterpret_cast<void*>(handler)));
 
     return sub;
   };
@@ -1057,13 +1056,12 @@ class Subscription {
                                  const std::string& queue_group,
                                  message_handler f) {
     Subscription sub(conn);
-    sub.set_message_func(f);
+    // Dynamic allocation so that it outlasts the function.
+    message_handler* handler = new message_handler(f);
 
     HANDLE_STATUS(natsConnection_QueueSubscribe(
         &sub.sub_, conn._get_ptr(), subject.c_str(), queue_group.c_str(),
-        sub.message_func_.target<void(natsConnection*, natsSubscription*,
-                                      natsMsg*, void*)>(),
-        nullptr));
+        message_handler_func, reinterpret_cast<void*>(handler)));
 
     return sub;
   }
@@ -1100,11 +1098,9 @@ class Subscription {
   Subscription(const Subscription&) = delete;
 
   /// Define a move constructor so that the factory methods work.
-  Subscription(Subscription&& other) noexcept
-      : sub_(other.sub_),
-        conn_(other.conn_),
-        sync_(other.sync_),
-        message_func_(other.message_func_) {
+  Subscription(Subscription&& other) noexcept : sub_(other.sub_),
+                                                conn_(other.conn_),
+                                                sync_(other.sync_) {
     other.sub_ = nullptr;
   }
 
@@ -1218,18 +1214,14 @@ class Subscription {
   Connection& conn_;
   bool sync_ = false;
 
-  typedef std::function<void(natsConnection*, natsSubscription*, natsMsg*,
-                             void*)>
-      nats_message_handler;
-  nats_message_handler message_func_;
-
-  // A helper method for setting message_func_.
-  void inline set_message_func(message_handler f) {
-    message_func_ = [f](natsConnection*, natsSubscription*, natsMsg* nats_msg,
-                        void*) {
-      Message msg(nats_msg);
-      f(msg);
-    };
+  // Message handler for passing to cnats. The data passed is interpreted as
+  // a message_handler*.
+  static void message_handler_func(natsConnection*, natsSubscription*,
+                                   natsMsg* nats_msg, void* data) {
+    auto f = reinterpret_cast<message_handler*>(data);
+    Message msg(nats_msg);
+    (*f)(msg);
+    delete f;
   }
 };
 
