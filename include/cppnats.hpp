@@ -4,6 +4,7 @@
 #define CPPNATS_HPP
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -259,7 +260,7 @@ struct Message {
    * message.
    */
   Message(natsMsg* nats_msg) : nats_msg_(nats_msg) {
-    if (!nats_msg) throw std::invalid_argument("nats_msg cannot be nullptr");
+    assert(nats_msg != nullptr);
 
     subject = natsMsg_GetSubject(nats_msg);
     reply = natsMsg_GetReply(nats_msg);
@@ -1032,8 +1033,8 @@ class Subscription {
     message_handler* handler = new message_handler(f);
 
     HANDLE_STATUS(natsConnection_Subscribe(
-        &sub.sub_, conn._get_ptr(), subject.c_str(),  // test_handler,
-        message_handler_func, reinterpret_cast<void*>(handler)));
+        &sub.sub_, conn._get_ptr(), subject.c_str(), message_handler_func,
+        reinterpret_cast<void*>(handler)));
 
     return sub;
   };

@@ -65,7 +65,10 @@ TEST_CASE("Test if connection succeeds") {
 
           cv.notify_all();
         });
-    sub.auto_unsubscribe(1);
+
+    // Avoid compiler warnings/errors as sub needs to be saved till the end of
+    // scope and isn't used.
+    (void)sub;
 
     // Send the message.
     auto status = conn.publish_message(msg);
