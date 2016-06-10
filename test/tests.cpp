@@ -66,12 +66,12 @@ TEST_CASE("Test if connection succeeds") {
           cv.notify_all();
         });
 
-    // Avoid compiler warnings/errors as sub needs to be saved till the end of
-    // scope and isn't used.
-    (void)sub;
+    // Start the subscription
+    auto status = sub.start();
+    REQUIRE(status == cppnats::Status::OK);
 
     // Send the message.
-    auto status = conn.publish_message(msg);
+    status = conn.publish_message(msg);
     REQUIRE(status == cppnats::Status::OK);
 
     // Wait for the message for 100ms.

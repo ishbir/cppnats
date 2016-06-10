@@ -1028,15 +1028,7 @@ class Subscription {
    */
   static Subscription Async(Connection& conn, const std::string& subject,
                             message_handler f) {
-    Subscription sub(conn);
-    // Dynamic allocation so that it outlasts the function.
-    message_handler* handler = new message_handler(f);
-
-    HANDLE_STATUS(natsConnection_Subscribe(
-        &sub.sub_, conn._get_ptr(), subject.c_str(), message_handler_func,
-        reinterpret_cast<void*>(handler)));
-
-    return sub;
+    return Subscription(conn, subject, "", f, false);
   };
 
   /** \brief Creates a synchronous subcription.
@@ -1048,10 +1040,9 @@ class Subscription {
    * @param subject the subject this subscription is created for.
    */
   static Subscription Sync(Connection& conn, const std::string& subject) {
-    Subscription sub(conn);
+    Subscription sub(conn, subject, "", nullptr, true);
     HANDLE_STATUS(natsConnection_SubscribeSync(&sub.sub_, conn._get_ptr(),
                                                subject.c_str()));
-    sub.sync_ = true;
     return sub;
   }
 
@@ -1070,15 +1061,7 @@ class Subscription {
   static Subscription AsyncQueue(Connection& conn, const std::string& subject,
                                  const std::string& queue_group,
                                  message_handler f) {
-    Subscription sub(conn);
-    // Dynamic allocation so that it outlasts the function.
-    message_handler* handler = new message_handler(f);
-
-    HANDLE_STATUS(natsConnection_QueueSubscribe(
-        &sub.sub_, conn._get_ptr(), subject.c_str(), queue_group.c_str(),
-        message_handler_func, reinterpret_cast<void*>(handler)));
-
-    return sub;
+    return Subscription(conn, subject, queue_group, f, false);
   }
 
   /** \brief Creates a synchronous queue subscriber.
@@ -1092,10 +1075,9 @@ class Subscription {
    */
   static Subscription SyncQueue(Connection& conn, const std::string& subject,
                                 const std::string& queue_group) {
-    Subscription sub(conn);
+    Subscription sub(conn, subject, queue_group, nullptr, true);
     HANDLE_STATUS(natsConnection_QueueSubscribeSync(
         &sub.sub_, conn._get_ptr(), subject.c_str(), queue_group.c_str()));
-    sub.sync_ = true;
     return sub;
   }
 
@@ -1113,10 +1095,32 @@ class Subscription {
   Subscription(const Subscription&) = delete;
 
   /// Define a move constructor so that the factory methods work.
-  Subscription(Subscription&& other) noexcept : sub_(other.sub_),
-                                                conn_(other.conn_),
-                                                sync_(other.sync_) {
+  Subscription(Subscription&& other) noexcept
+      : Subscription(other.conn_, other.subject_, other.queue_group_,
+                     other.msg_handler_, other.sync_) {
     other.sub_ = nullptr;
+  }
+
+  /** \brief Start the async subscription.
+   *
+   * Starts an async subscription with the server.
+   * This method must not be called on synchronous subscriptions or an exception
+   * will be thrown.
+   */
+  Status start() {
+    if (sync_)
+      throw std::logic_error(
+          "cannot start a sync subscription; use next_msg to poll for new "
+          "messages");
+
+    if (queue_)
+      return convert_natsStatus(natsConnection_QueueSubscribe(
+          &sub_, conn_._get_ptr(), subject_.c_str(), queue_group_.c_str(),
+          message_handler_func, reinterpret_cast<Subscription*>(this)));
+
+    return convert_natsStatus(natsConnection_Subscribe(
+        &sub_, conn_._get_ptr(), subject_.c_str(), message_handler_func,
+        reinterpret_cast<void*>(this)));
   }
 
   /** \brief Enables the No Delivery Delay mode.
@@ -1225,20 +1229,39 @@ class Subscription {
   bool is_valid() const { return natsSubscription_IsValid(sub_); }
 
  private:
-  Subscription(Connection& conn) : conn_(conn) {}  // private constructor
+  // Private constructor.
+  Subscription(Connection& conn, const std::string& subject,
+               const std::string& queue_group, message_handler f, bool sync)
+      : conn_(conn),
+        subject_(subject),
+        queue_group_(queue_group),
+        msg_handler_(f),
+        sync_(sync) {
+    if (queue_group.length() != 0)
+      queue_ = true;
+    else
+      queue_ = false;
+  }
 
-  natsSubscription* sub_;
+  // Set at the time of construction.
   Connection& conn_;
-  bool sync_ = false;
+  std::string subject_;
+  std::string queue_group_;
+  message_handler msg_handler_;  // For async callbacks.
+  bool sync_;
+  bool queue_;
+
+  // Maybe set at the time of construction or with subscribe() in case of async
+  // subscriptions.
+  natsSubscription* sub_;
 
   // Message handler for passing to cnats. The data passed is interpreted as
-  // a message_handler*.
+  // Subscription*.
   static void message_handler_func(natsConnection*, natsSubscription*,
                                    natsMsg* nats_msg, void* data) {
-    auto f = reinterpret_cast<message_handler*>(data);
+    auto f = reinterpret_cast<Subscription*>(data);
     Message msg(nats_msg);
-    (*f)(msg);
-    delete f;
+    f->msg_handler_(msg);
   }
 };
 
