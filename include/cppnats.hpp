@@ -235,7 +235,7 @@ struct Message {
   Message(const std::string& subject, const char* data, size_t data_length)
       : subject(subject), data(data), data_length(data_length) {}
 
-  Message(const std::string& subject, const std::string& data)
+  Message(const std::string& subject, std::string& data)
       : subject(subject),
         reply(""),
         data(data.data()),
@@ -246,7 +246,7 @@ struct Message {
       : subject(subject), reply(reply), data(data), data_length(data_length) {}
 
   Message(const std::string& subject, const std::string& reply,
-          const std::string& data)
+          std::string& data)
       : subject(subject),
         reply(reply),
         data(data.data()),
@@ -652,9 +652,7 @@ class Options {
   /**
    * \bug Not implemented yet.
    */
-  template <typename T>
-  void error_handler(
-      std::function<void(Connection&, Subscription&, Status, T)> f);
+  void error_handler(std::function<void(Connection&, Subscription&, Status)> f);
 
   /** \brief Sets the callback to be invoked when a connection to a server
    *         is permanently lost.
@@ -874,16 +872,17 @@ class Connection {
 
   /// Gets the URL of the currently connected server.
   std::string get_connected_url() const {
-    char buf[256];
-    HANDLE_STATUS(natsConnection_GetConnectedUrl(conn_, buf, sizeof(buf)));
-    return std::string(buf);
+    std::array<char, 256> buf;
+    HANDLE_STATUS(natsConnection_GetConnectedUrl(conn_, &buf[0], buf.size()));
+    return std::string(&buf[0]);
   }
 
   /// Gets the server ID.
   std::string get_connected_server_id() const {
-    char buf[256];
-    HANDLE_STATUS(natsConnection_GetConnectedServerId(conn_, buf, sizeof(buf)));
-    return std::string(buf);
+    std::array<char, 256> buf;
+    HANDLE_STATUS(
+        natsConnection_GetConnectedServerId(conn_, &buf[0], buf.size()));
+    return std::string(&buf[0]);
   }
 
   /// Gets the last connection error.
@@ -935,7 +934,7 @@ class Connection {
    *                in this alloted time.
    */
   template <class Rep, class Period>
-  std::unique_ptr<Message> request_and_get_reply(
+  std::unique_ptr<Message> request(
       const Message& req, const std::chrono::duration<Rep, Period>& timeout) {
     natsMsg* nats_msg;
     natsStatus status = natsConnection_Request(
