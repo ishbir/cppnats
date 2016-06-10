@@ -36,12 +36,15 @@ TEST_CASE("Test if connection succeeds") {
     // Create a subscription first so that the message sent isn't lost.
     auto sub = cppnats::Subscription::Sync(conn, subject);
 
+    // A move shouldn't affect anything.
+    auto sub1 = std::move(sub);
+
     // Send the message.
     auto status = conn.publish_message(msg);
     REQUIRE(status == cppnats::Status::OK);
 
     // Synchronously receive the message.
-    auto msg_recvd = sub.next_msg(std::chrono::milliseconds(100));
+    auto msg_recvd = sub1.next_msg(std::chrono::milliseconds(100));
 
     // Check that we got it.
     REQUIRE(static_cast<bool>(msg_recvd));
@@ -66,12 +69,11 @@ TEST_CASE("Test if connection succeeds") {
           cv.notify_all();
         });
 
-    // Start the subscription
-    auto status = sub.start();
-    REQUIRE(status == cppnats::Status::OK);
+    // A move shouldn't affect anything.
+    auto sub1 = std::move(sub);
 
     // Send the message.
-    status = conn.publish_message(msg);
+    auto status = conn.publish_message(msg);
     REQUIRE(status == cppnats::Status::OK);
 
     // Wait for the message for 100ms.

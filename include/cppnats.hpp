@@ -298,7 +298,7 @@ class Options {
  public:
   /// The function that is called in case of a connection disconnect, reconnect
   /// or close.
-  typedef std::function<void(Connection&)> connection_handler;
+  typedef std::function<void(natsConnection*)> connection_handler;
 
   /** \brief Construct a Options and specify a URL to connect to.
    *
@@ -765,11 +765,10 @@ class Connection {
   Connection(const Connection&) = delete;
 
   /// Define a move constructor.
-  Connection(Connection&& other) noexcept
-      : conn_(other.conn_),
-        closed_handler_(other.closed_handler_),
-        disconnected_handler_(other.disconnected_handler_),
-        reconnected_handler_(other.reconnected_handler_) {
+  Connection(Connection&& other) noexcept : conn_(other.conn_) {
+    closed_handler_ = std::move(other.closed_handler_);
+    disconnected_handler_ = std::move(other.disconnected_handler_);
+    reconnected_handler_ = std::move(other.reconnected_handler_);
     other.conn_ = nullptr;
   }
 
@@ -950,34 +949,41 @@ class Connection {
 
  protected:
   // The following 3 functions are here instead of Options because of the way
-  // CNATS is designed. The callback function needs to receive a Connection
-  // object and the neatest way of doing this is setting the 3 callbacks here.
+  // CNATS is designed. The callback function needs to receive natsConnection*
+  // and thus the handler function must last until the end of Connection.
+  // If it had been set in Options and then Options destroyed, the callbacks
+  // wouldn't work.
 
   /// Set the closed callback handler in options.
   void set_closed_cb(const Options& opts) {
-    closed_handler_ = opts.get_closed_callback();
-    if (!closed_handler_) return;
+    auto f = opts.get_closed_callback();
+    if (!f) return;
+    closed_handler_ = std::make_unique<Options::connection_handler>(f);
 
-    natsOptions_SetClosedCB(opts._get_ptr(), closed_handler_nats,
-                            reinterpret_cast<void*>(this));
+    natsOptions_SetClosedCB(opts._get_ptr(), connection_handler_nats,
+                            reinterpret_cast<void*>(closed_handler_.get()));
   }
 
   /// Set the disconnected callback handler in options.
   void set_disconnected_cb(const Options& opts) {
-    disconnected_handler_ = opts.get_disconnected_callback();
-    if (!disconnected_handler_) return;
+    auto f = opts.get_disconnected_callback();
+    if (!f) return;
+    disconnected_handler_ = std::make_unique<Options::connection_handler>(f);
 
-    natsOptions_SetDisconnectedCB(opts._get_ptr(), disconnected_handler_nats,
-                                  reinterpret_cast<void*>(this));
+    natsOptions_SetDisconnectedCB(
+        opts._get_ptr(), connection_handler_nats,
+        reinterpret_cast<void*>(disconnected_handler_.get()));
   }
 
   /// Set the reconnected callback handler in options.
   void set_reconnected_cb(const Options& opts) {
-    reconnected_handler_ = opts.get_reconnected_callback();
-    if (!reconnected_handler_) return;
+    auto f = opts.get_reconnected_callback();
+    if (!f) return;
+    reconnected_handler_ = std::make_unique<Options::connection_handler>(f);
 
-    natsOptions_SetReconnectedCB(opts._get_ptr(), reconnected_handler_nats,
-                                 reinterpret_cast<void*>(this));
+    natsOptions_SetReconnectedCB(
+        opts._get_ptr(), connection_handler_nats,
+        reinterpret_cast<void*>(reconnected_handler_.get()));
   }
 
  private:
@@ -986,23 +992,13 @@ class Connection {
   // The following variables and functions are useful for connection callbacks.
   // This is because we cannot take function pointer to a lambda and thus must
   // rely on passing around the Connection instance.
-  Options::connection_handler closed_handler_;
-  Options::connection_handler disconnected_handler_;
-  Options::connection_handler reconnected_handler_;
+  std::unique_ptr<Options::connection_handler> closed_handler_;
+  std::unique_ptr<Options::connection_handler> disconnected_handler_;
+  std::unique_ptr<Options::connection_handler> reconnected_handler_;
 
-  static void closed_handler_nats(natsConnection*, void* data) {
-    auto f = reinterpret_cast<Connection*>(data);
-    f->closed_handler_(*f);
-  }
-
-  static void disconnected_handler_nats(natsConnection*, void* data) {
-    auto f = reinterpret_cast<Connection*>(data);
-    f->disconnected_handler_(*f);
-  }
-
-  static void reconnected_handler_nats(natsConnection*, void* data) {
-    auto f = reinterpret_cast<Connection*>(data);
-    f->reconnected_handler_(*f);
+  static void connection_handler_nats(natsConnection* conn, void* data) {
+    auto f = reinterpret_cast<Options::connection_handler*>(data);
+    (*f)(conn);
   }
 };
 
@@ -1027,8 +1023,15 @@ class Subscription {
    */
   static Subscription Async(Connection& conn, const std::string& subject,
                             message_handler f) {
-    return Subscription(conn, subject, "", f, false);
-  };
+    Subscription sub(conn, subject, "", false);
+    sub.msg_handler_ = std::make_unique<message_handler>(f);
+
+    HANDLE_STATUS(natsConnection_Subscribe(
+        &sub.sub_, conn._get_ptr(), subject.c_str(), message_handler_func,
+        reinterpret_cast<void*>(sub.msg_handler_.get())));
+
+    return sub;
+  }
 
   /** \brief Creates a synchronous subcription.
    *
@@ -1039,7 +1042,7 @@ class Subscription {
    * @param subject the subject this subscription is created for.
    */
   static Subscription Sync(Connection& conn, const std::string& subject) {
-    Subscription sub(conn, subject, "", nullptr, true);
+    Subscription sub(conn, subject, "", true);
     HANDLE_STATUS(natsConnection_SubscribeSync(&sub.sub_, conn._get_ptr(),
                                                subject.c_str()));
     return sub;
@@ -1060,7 +1063,14 @@ class Subscription {
   static Subscription AsyncQueue(Connection& conn, const std::string& subject,
                                  const std::string& queue_group,
                                  message_handler f) {
-    return Subscription(conn, subject, queue_group, f, false);
+    Subscription sub(conn, subject, queue_group, false);
+    sub.msg_handler_ = std::make_unique<message_handler>(f);
+
+    HANDLE_STATUS(natsConnection_QueueSubscribe(
+        &sub.sub_, conn._get_ptr(), subject.c_str(), queue_group.c_str(),
+        message_handler_func, reinterpret_cast<void*>(sub.msg_handler_.get())));
+
+    return sub;
   }
 
   /** \brief Creates a synchronous queue subscriber.
@@ -1074,7 +1084,7 @@ class Subscription {
    */
   static Subscription SyncQueue(Connection& conn, const std::string& subject,
                                 const std::string& queue_group) {
-    Subscription sub(conn, subject, queue_group, nullptr, true);
+    Subscription sub(conn, subject, queue_group, true);
     HANDLE_STATUS(natsConnection_QueueSubscribeSync(
         &sub.sub_, conn._get_ptr(), subject.c_str(), queue_group.c_str()));
     return sub;
@@ -1096,30 +1106,10 @@ class Subscription {
   /// Define a move constructor so that the factory methods work.
   Subscription(Subscription&& other) noexcept
       : Subscription(other.conn_, other.subject_, other.queue_group_,
-                     other.msg_handler_, other.sync_) {
+                     other.sync_) {
+    msg_handler_ = std::move(other.msg_handler_);
+    sub_ = other.sub_;
     other.sub_ = nullptr;
-  }
-
-  /** \brief Start the async subscription.
-   *
-   * Starts an async subscription with the server.
-   * This method must not be called on synchronous subscriptions or an exception
-   * will be thrown.
-   */
-  Status start() {
-    if (sync_)
-      throw std::logic_error(
-          "cannot start a sync subscription; use next_msg to poll for new "
-          "messages");
-
-    if (queue_)
-      return convert_natsStatus(natsConnection_QueueSubscribe(
-          &sub_, conn_._get_ptr(), subject_.c_str(), queue_group_.c_str(),
-          message_handler_func, reinterpret_cast<Subscription*>(this)));
-
-    return convert_natsStatus(natsConnection_Subscribe(
-        &sub_, conn_._get_ptr(), subject_.c_str(), message_handler_func,
-        reinterpret_cast<void*>(this)));
   }
 
   /** \brief Enables the No Delivery Delay mode.
@@ -1227,15 +1217,18 @@ class Subscription {
    */
   bool is_valid() const { return natsSubscription_IsValid(sub_); }
 
+  /// Get the subject that the subscription is subscribed to.
+  std::string get_subject() { return subject_; }
+
+  /// Get the queue group that the subcription is subscribed to. If the
+  /// subscription isn't a queue, it will return an empty string.
+  std::string get_queue_group() { return queue_group_; }
+
  private:
   // Private constructor.
   Subscription(Connection& conn, const std::string& subject,
-               const std::string& queue_group, message_handler f, bool sync)
-      : conn_(conn),
-        subject_(subject),
-        queue_group_(queue_group),
-        msg_handler_(f),
-        sync_(sync) {
+               const std::string& queue_group, bool sync)
+      : conn_(conn), subject_(subject), queue_group_(queue_group), sync_(sync) {
     if (queue_group.length() != 0)
       queue_ = true;
     else
@@ -1246,21 +1239,19 @@ class Subscription {
   Connection& conn_;
   std::string subject_;
   std::string queue_group_;
-  message_handler msg_handler_;  // For async callbacks.
+  std::unique_ptr<message_handler> msg_handler_;  // For async callbacks.
   bool sync_;
   bool queue_;
 
-  // Maybe set at the time of construction or with subscribe() in case of async
-  // subscriptions.
   natsSubscription* sub_;
 
   // Message handler for passing to cnats. The data passed is interpreted as
-  // Subscription*.
+  // message_handler*.
   static void message_handler_func(natsConnection*, natsSubscription*,
                                    natsMsg* nats_msg, void* data) {
-    auto f = reinterpret_cast<Subscription*>(data);
+    auto f = reinterpret_cast<message_handler*>(data);
     Message msg(nats_msg);
-    f->msg_handler_(msg);
+    (*f)(msg);
   }
 };
 
