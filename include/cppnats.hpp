@@ -296,9 +296,29 @@ struct Message {
  */
 class Options {
  public:
-  /// The function that is called in case of a connection disconnect, reconnect
-  /// or close.
+  /** \brief Callback used to notify the user of asynchronous connection events.
+   *
+   * This callback is used for asynchronous events such as disconnected
+   * and closed connections.
+   *
+   * @see #closed_callback()
+   * @see #disconnected_callback()
+   * @see #reconnected_callback()
+   *
+   * \warning Such callback is invoked from a dedicated thread and the state
+   *          of the connection that triggered the event may have changed since
+   *          that event was generated.
+   */
   typedef std::function<void(natsConnection*)> connection_handler;
+
+  /** \brief Callback used to notify the user of errors encountered while
+   * processing inbound messages.
+   *
+   * This callback is used to process asynchronous errors encountered while
+   * processing inbound messages, such as Status::SlowConsumer.
+   */
+  typedef std::function<void(natsConnection*, natsSubscription*, Status)>
+      error_handler;
 
   /** \brief Construct a Options and specify a URL to connect to.
    *
@@ -329,7 +349,8 @@ class Options {
   Options(Options&& other) noexcept : opts_(other.opts_),
                                       closed_cb_(other.closed_cb_),
                                       disconnected_cb_(other.disconnected_cb_),
-                                      reconnected_cb_(other.reconnected_cb_) {
+                                      reconnected_cb_(other.reconnected_cb_),
+                                      error_cb_(other.error_cb_) {
     other.opts_ = nullptr;
   }
 
@@ -649,10 +670,24 @@ class Options {
     return std::move(*this);
   }
 
-  /**
-   * \bug Not implemented yet.
+  /** \brief Sets the error handler for asynchronous events.
+   *
+   * Specifies the callback to invoke when an asynchronous error
+   * occurs. This is used by applications having only asynchronous
+   * subscriptions that would not know otherwise that a problem with the
+   * connection occurred.
+   *
+   * @see error_handler
+   *
+   * @param f the error handler callback.
    */
-  void error_handler(std::function<void(Connection&, Subscription&, Status)> f);
+  Options error_callback(error_handler f) {
+    error_cb_ = f;
+    return std::move(*this);
+  }
+
+  /// Returns the error callback set using #error_callback.
+  error_handler get_error_callback() const { return error_cb_; }
 
   /** \brief Sets the callback to be invoked when a connection to a server
    *         is permanently lost.
@@ -726,6 +761,7 @@ class Options {
   connection_handler closed_cb_;
   connection_handler disconnected_cb_;
   connection_handler reconnected_cb_;
+  error_handler error_cb_;
 };
 
 /** \brief Wraps a natsConnection and provides a high-level API.
@@ -752,6 +788,7 @@ class Connection {
     set_closed_cb(opts);
     set_disconnected_cb(opts);
     set_reconnected_cb(opts);
+    set_error_cb(opts);
 
     HANDLE_STATUS(natsConnection_Connect(&conn_, opts._get_ptr()));
   }
@@ -769,6 +806,7 @@ class Connection {
     closed_handler_ = std::move(other.closed_handler_);
     disconnected_handler_ = std::move(other.disconnected_handler_);
     reconnected_handler_ = std::move(other.reconnected_handler_);
+    error_handler_ = std::move(other.error_handler_);
     other.conn_ = nullptr;
   }
 
@@ -986,19 +1024,36 @@ class Connection {
         reinterpret_cast<void*>(reconnected_handler_.get()));
   }
 
+  /// Set the error callback handler in options.
+  void set_error_cb(const Options& opts) {
+    auto f = opts.get_error_callback();
+    if (!f) return;
+    error_handler_ = std::make_unique<Options::error_handler>(f);
+
+    natsOptions_SetErrorHandler(opts._get_ptr(), error_handler_nats,
+                                reinterpret_cast<void*>(error_handler_.get()));
+  }
+
  private:
   natsConnection* conn_;
 
   // The following variables and functions are useful for connection callbacks.
   // This is because we cannot take function pointer to a lambda and thus must
-  // rely on passing around the Connection instance.
+  // rely on passing around the pointers to std::function.
   std::unique_ptr<Options::connection_handler> closed_handler_;
   std::unique_ptr<Options::connection_handler> disconnected_handler_;
   std::unique_ptr<Options::connection_handler> reconnected_handler_;
+  std::unique_ptr<Options::error_handler> error_handler_;
 
   static void connection_handler_nats(natsConnection* conn, void* data) {
     auto f = reinterpret_cast<Options::connection_handler*>(data);
     (*f)(conn);
+  }
+
+  static void error_handler_nats(natsConnection* conn, natsSubscription* sub,
+                                 natsStatus status, void* data) {
+    auto f = reinterpret_cast<Options::error_handler*>(data);
+    (*f)(conn, sub, convert_natsStatus(status));
   }
 };
 
